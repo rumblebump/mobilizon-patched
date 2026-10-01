@@ -1,0 +1,182 @@
+name: build
+
+# Checks out the newest upstream Mobilizon release, applies patches/*.patch and
+# publishes the image to ghcr.io/<owner>/mobilizon-patched. A release is only
+# rebuilt when no image exists yet for that upstream version and patch set.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays 04:17 UTC
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream tag to build (default: newest release)"
+        required: false
+      force:
+        description: Rebuild even if the image already exists
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: https://framagit.org/kaihuri/mobilizon.git
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      image: ${{ steps.version.outputs.image }}
+      tags: ${{ steps.version.outputs.tags }}
+      build: ${{ steps.exists.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          latest="$(scripts/latest-version.sh)"
+          [[ -n "$latest" ]] || { echo "::error::no upstream release tag found"; exit 1; }
+          tag="${INPUT_VERSION:-$latest}"
+          version="${tag#v}"
+          # Short hash of the patch set, so changed patches produce a new image tag.
+          patchset="$(cat patches/*.patch 2>/dev/null | sha256sum | cut -c1-7)"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mobilizon-patched"
+
+          tags="$image:$version,$image:$version-p$patchset"
+          [[ "$tag" == "$latest" ]] && tags="$tags,$image:latest"
+
+          echo "Upstream $tag (newest: $latest), patch set $patchset"
+          {
+            echo "tag=$tag"
+            echo "version=$version-p$patchset"
+            echo "image=$image"
+            echo "tags=$tags"
+          } >> "$GITHUB_OUTPUT"
+
+      # Fails here, before any build, when a patch no longer applies to upstream.
+      - name: Apply patches
+        run: scripts/prepare.sh "${{ steps.version.outputs.tag }}" "$RUNNER_TEMP/src"
+
+      - id: exists
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          # Pull requests always build (without pushing) so the patches are compiled before merge.
+          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          ref="${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}"
+          if [[ "$FORCE" != true ]] && docker buildx imagetools inspect "$ref" > /dev/null 2>&1; then
+            echo "$ref already exists, nothing to do"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.build == 'true'
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: scripts/prepare.sh "${{ needs.resolve.outputs.tag }}" src
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          file: src/docker/production/Dockerfile
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VCS_REF=${{ github.sha }}
+          labels: |
+            org.opencontainers.image.title=mobilizon-patched
+            org.opencontainers.image.description=Mobilizon ${{ needs.resolve.outputs.tag }} with the patches from ${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
+            org.opencontainers.image.licenses=AGPL-3.0
+          outputs: type=image,name=${{ needs.resolve.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+
+  publish:
+    needs: [resolve, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.resolve.outputs.image }}
+          TAGS: ${{ needs.resolve.outputs.tags }}
+        run: |
+          args=()
+          for t in ${TAGS//,/ }; do args+=(-t "$t"); done
+          docker buildx imagetools create "${args[@]}" $(printf "$IMAGE@sha256:%s " *)
+          docker buildx imagetools inspect "${TAGS%%,*}"

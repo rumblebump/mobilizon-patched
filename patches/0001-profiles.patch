@@ -1,0 +1,520 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mobilizon-patched <noreply@github.com>
+Date: Thu, 1 Oct 2026 07:54:27 +0000
+Subject: [PATCH] Add opt-in restricted and locked profiles
+
+MOBILIZON_INSTANCE_RESTRICT_PROFILES=true (config :mobilizon, :instance,
+restrict_profiles: true) limits every non-admin account to one profile,
+whatever the login method (local, LDAP, OAuth).
+
+MOBILIZON_INSTANCE_LOCK_PROFILES=true (lock_profiles: true) goes further: the
+profile username and display name both come from the part of the account
+email before the @ (lowercased, other characters than a-z0-9_ become _).
+The profile is created on the first login, its display name can't be changed
+and is reset to the username on every login. A local signup whose username
+is already taken is refused, and an LDAP or OAuth login whose username is
+taken fails.
+
+Administrators are exempt from both. Both default to false, so the image
+behaves like upstream until enabled.
+
+The production Docker build uses npm ci with the committed package-lock.json
+(no longer excluded by .dockerignore), as npm install re-resolves the
+dependency tree and currently fails.
+---
+ .dockerignore                               |  1 -
+ config/config.exs                           |  2 +
+ config/docker.exs                           |  2 +
+ docker/production/Dockerfile                |  3 +-
+ lib/graphql/resolvers/config.ex             |  2 +
+ lib/graphql/resolvers/person.ex             | 34 +++++++-
+ lib/graphql/resolvers/user.ex               | 10 ++-
+ lib/graphql/schema/config.ex                |  8 ++
+ lib/mobilizon/config.ex                     | 13 +++
+ lib/mobilizon/users/locked_profile.ex       | 91 +++++++++++++++++++++
+ lib/service/auth/authenticator.ex           |  9 +-
+ src/components/Settings/SettingsMenu.vue    |  7 ++
+ src/composition/apollo/config.ts            | 14 ++++
+ src/graphql/config.ts                       |  2 +
+ src/types/config.model.ts                   |  2 +
+ src/views/Account/children/EditIdentity.vue | 14 +++-
+ 16 files changed, 205 insertions(+), 9 deletions(-)
+ create mode 100644 lib/mobilizon/users/locked_profile.ex
+
+diff --git a/.dockerignore b/.dockerignore
+index 7f29df3..3273c22 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -19,7 +19,6 @@ Makefile
+ README.md
+ SECURITY.md
+ ssh_match_hostname
+-package-lock.json
+ node_modules
+ playwright-report
+ test
+diff --git a/config/config.exs b/config/config.exs
+index 66b56f8..4f43810 100644
+--- a/config/config.exs
++++ b/config/config.exs
+@@ -21,6 +21,8 @@ config :mobilizon, :instance,
+   registration_email_allowlist: [],
+   registration_email_denylist: [],
+   disable_database_login: false,
++  restrict_profiles: false,
++  lock_profiles: false,
+   languages: [],
+   default_language: "en",
+   demo: false,
+diff --git a/config/docker.exs b/config/docker.exs
+index 9b19fee..fee3d08 100644
+--- a/config/docker.exs
++++ b/config/docker.exs
+@@ -64,6 +64,8 @@ config :mobilizon, :instance,
+     |> String.split(",", trim: true),
+   disable_database_login:
+     System.get_env("MOBILIZON_INSTANCE_DISABLE_DATABASE_LOGIN", "false") == "true",
++  restrict_profiles: System.get_env("MOBILIZON_INSTANCE_RESTRICT_PROFILES", "false") == "true",
++  lock_profiles: System.get_env("MOBILIZON_INSTANCE_LOCK_PROFILES", "false") == "true",
+   default_language: System.get_env("MOBILIZON_INSTANCE_DEFAULT_LANGUAGE", "en"),
+   demo: System.get_env("MOBILIZON_INSTANCE_DEMO", "false") == "true",
+   allow_relay: System.get_env("MOBILIZON_INSTANCE_ALLOW_RELAY", "true") == "true",
+diff --git a/docker/production/Dockerfile b/docker/production/Dockerfile
+index 1d67f58..5bd0a7a 100644
+--- a/docker/production/Dockerfile
++++ b/docker/production/Dockerfile
+@@ -6,7 +6,8 @@ WORKDIR /build
+ COPY . .
+ 
+ # Network timeout because it's slow when cross-compiling
+-RUN npm install && npm run build
++# mobilizon-patched: npm ci installs the locked versions; npm install re-resolves and fails.
++RUN npm ci && npm run build
+ 
+ # Then, build the application binary
+ FROM elixir:1.16-alpine AS builder
+diff --git a/lib/graphql/resolvers/config.ex b/lib/graphql/resolvers/config.ex
+index 62acb57..fa28511 100644
+--- a/lib/graphql/resolvers/config.ex
++++ b/lib/graphql/resolvers/config.ex
+@@ -91,6 +91,8 @@ defmodule Mobilizon.GraphQL.Resolvers.Config do
+       external_links: Config.external_links(),
+       name: Config.instance_name(),
+       registrations_open: Config.instance_registrations_open?(),
++      restrict_profiles: Config.instance_restrict_profiles?(),
++      lock_profiles: Config.instance_lock_profiles?(),
+       registrations_moderation: Config.instance_registrations_moderation?(),
+       registrations_allowlist: Config.instance_registrations_allowlist?(),
+       contact: Config.contact(),
+diff --git a/lib/graphql/resolvers/person.ex b/lib/graphql/resolvers/person.ex
+index 792bc11..0573726 100644
+--- a/lib/graphql/resolvers/person.ex
++++ b/lib/graphql/resolvers/person.ex
+@@ -5,12 +5,12 @@ defmodule Mobilizon.GraphQL.Resolvers.Person do
+ 
+   import Mobilizon.Users.Guards
+ 
+-  alias Mobilizon.{Actors, Events, Users}
++  alias Mobilizon.{Actors, Config, Events, Users}
+   alias Mobilizon.Actors.{Actor, Follower, Member}
+   alias Mobilizon.Events.Participant
+   alias Mobilizon.Service.AntiSpam
+   alias Mobilizon.Storage.{Page, Repo}
+-  alias Mobilizon.Users.User
++  alias Mobilizon.Users.{LockedProfile, User}
+   import Mobilizon.Web.Gettext
+ 
+   alias Mobilizon.Federation.ActivityPub.Actions
+@@ -135,10 +135,11 @@ defmodule Mobilizon.GraphQL.Resolvers.Person do
+         %{preferred_username: _preferred_username} = args,
+         %{context: %{current_user: %{disabled: false} = user} = context} = _resolution
+       ) do
+-    args = Map.put(args, :user_id, user.id)
++    args = user |> lock_profile_name(args) |> Map.put(:user_id, user.id)
+     user_agent = Map.get(context, :user_agent, "")
+ 
+-    with args <- Map.update(args, :preferred_username, "", &String.downcase/1),
++    with {:single_profile, true} <- {:single_profile, can_create_profile?(user)},
++         args <- Map.update(args, :preferred_username, "", &String.downcase/1),
+          {:spam, :ham} <-
+            {:spam,
+             AntiSpam.service().check_profile(
+@@ -152,6 +153,9 @@ defmodule Mobilizon.GraphQL.Resolvers.Person do
+          {:ok, %Actor{} = new_person} <- Actors.new_person(args) do
+       {:ok, new_person}
+     else
++      {:single_profile, false} ->
++        {:error, dgettext("errors", "You can only have one profile")}
++
+       {:error, err} ->
+         {:error, err}
+ 
+@@ -177,6 +181,27 @@ defmodule Mobilizon.GraphQL.Resolvers.Person do
+     {:error, :unauthenticated}
+   end
+ 
++  # mobilizon-patched: with `restrict_profiles` enabled, every account gets a single
++  # profile, whatever the login method (local, LDAP, OAuth). Administrators may
++  # still create more.
++  @spec can_create_profile?(User.t()) :: boolean()
++  defp can_create_profile?(%User{role: role} = user) do
++    is_admin(role) or not Config.instance_restrict_profiles?() or
++      Users.get_actors_for_user(user) == []
++  end
++
++  # mobilizon-patched: with `lock_profiles` enabled, the username and display name come
++  # from the account email whatever the client sends.
++  @spec lock_profile_name(User.t(), map()) :: map()
++  defp lock_profile_name(%User{email: email} = user, args) do
++    if LockedProfile.locked?(user) do
++      username = LockedProfile.username_for(email)
++      Map.merge(args, %{preferred_username: username, name: username})
++    else
++      args
++    end
++  end
++
+   @doc """
+   This function is used to update an existing identity
+   """
+@@ -188,6 +213,7 @@ defmodule Mobilizon.GraphQL.Resolvers.Person do
+         %{context: %{current_user: user}} = _resolution
+       ) do
+     require Logger
++    args = if LockedProfile.locked?(user), do: Map.delete(args, :name), else: args
+     args = Map.put(args, :user_id, user.id)
+ 
+     case owned_actor(user, id) do
+diff --git a/lib/graphql/resolvers/user.ex b/lib/graphql/resolvers/user.ex
+index 436093c..cfb394c 100644
+--- a/lib/graphql/resolvers/user.ex
++++ b/lib/graphql/resolvers/user.ex
+@@ -12,7 +12,7 @@ defmodule Mobilizon.GraphQL.Resolvers.User do
+   alias Mobilizon.Service.Auth.Authenticator
+   alias Mobilizon.Service.Statistics
+   alias Mobilizon.Storage.Page
+-  alias Mobilizon.Users.{Setting, User}
++  alias Mobilizon.Users.{LockedProfile, Setting, User}
+ 
+   alias Mobilizon.Web.{Auth, Email}
+   import Mobilizon.Web.Gettext
+@@ -172,6 +172,8 @@ defmodule Mobilizon.GraphQL.Resolvers.User do
+     with {:ok, email} <- lowercase_domain(email),
+          :registration_ok <- check_registration_config(email, moderation),
+          :not_deny_listed <- check_registration_denylist(email),
++         {:locked_username_taken, false} <-
++           {:locked_username_taken, LockedProfile.username_taken?(email)},
+          {:spam, :ham} <-
+            {:spam, AntiSpam.service().check_user(email, current_ip, user_agent)},
+          {:ok, %User{} = user} <-
+@@ -214,6 +216,12 @@ defmodule Mobilizon.GraphQL.Resolvers.User do
+            "Your registration has been detected as spam and cannot be processed."
+          )}
+ 
++      {:locked_username_taken, true} ->
++        {:error,
++         dgettext("errors", "A profile with the username %{username} already exists",
++           username: LockedProfile.username_for(email)
++         )}
++
+       {:error, error} ->
+         {:error, error}
+     end
+diff --git a/lib/graphql/schema/config.ex b/lib/graphql/schema/config.ex
+index 7c99fa1..4439b48 100644
+--- a/lib/graphql/schema/config.ex
++++ b/lib/graphql/schema/config.ex
+@@ -26,6 +26,14 @@ defmodule Mobilizon.GraphQL.Schema.ConfigType do
+ 
+     field(:registrations_open, :boolean, description: "Whether the registrations are opened")
+ 
++    field(:restrict_profiles, :boolean,
++      description: "Whether non-admin accounts are limited to a single profile"
++    )
++
++    field(:lock_profiles, :boolean,
++      description: "Whether non-admin profiles are named after the account email and locked"
++    )
++
+     field(:registrations_moderation, :boolean,
+       description: "Whether the registrations want moderation"
+     )
+diff --git a/lib/mobilizon/config.ex b/lib/mobilizon/config.ex
+index 27622b1..06b3342 100644
+--- a/lib/mobilizon/config.ex
++++ b/lib/mobilizon/config.ex
+@@ -158,6 +158,19 @@ defmodule Mobilizon.Config do
+   @spec instance_hostname :: String.t()
+   def instance_hostname, do: instance_config()[:hostname]
+ 
++  @doc """
++  Whether non-admin accounts are limited to a single profile (mobilizon-patched).
++  """
++  @spec instance_restrict_profiles? :: boolean
++  def instance_restrict_profiles?, do: to_boolean(instance_config()[:restrict_profiles])
++
++  @doc """
++  Whether non-admin profiles are named after the account email and can't be renamed
++  (mobilizon-patched).
++  """
++  @spec instance_lock_profiles? :: boolean
++  def instance_lock_profiles?, do: to_boolean(instance_config()[:lock_profiles])
++
+   @spec instance_registrations_open? :: boolean
+   def instance_registrations_open?,
+     do:
+diff --git a/lib/mobilizon/users/locked_profile.ex b/lib/mobilizon/users/locked_profile.ex
+new file mode 100644
+index 0000000..51401dd
+--- /dev/null
++++ b/lib/mobilizon/users/locked_profile.ex
+@@ -0,0 +1,91 @@
++defmodule Mobilizon.Users.LockedProfile do
++  @moduledoc """
++  mobilizon-patched: locked profiles.
++
++  With `lock_profiles` enabled, every non-admin account has exactly one profile whose
++  username and display name are both derived from the part of the account email before
++  the `@`. The profile is created on the first login (local, LDAP or OAuth), and its
++  display name is reset to the username on every login, so it can't be used to
++  impersonate someone else.
++  """
++
++  alias Mobilizon.{Actors, Config, Users}
++  alias Mobilizon.Actors.Actor
++  alias Mobilizon.Federation.ActivityPub.Actions
++  alias Mobilizon.Users.User
++
++  import Mobilizon.Users.Guards
++  require Logger
++
++  @spec enabled?() :: boolean()
++  def enabled?, do: Config.instance_lock_profiles?()
++
++  @doc """
++  Whether the profiles of this user are locked.
++  """
++  @spec locked?(User.t()) :: boolean()
++  def locked?(%User{role: role}) when is_admin(role), do: false
++  def locked?(%User{}), do: enabled?()
++
++  @doc """
++  The profile username for an email: its local part, lowercased, with every character
++  other than `a-z`, `0-9` and `_` replaced by `_`.
++  """
++  @spec username_for(String.t()) :: String.t()
++  def username_for(email) do
++    email
++    |> String.split("@")
++    |> hd()
++    |> String.downcase()
++    |> String.replace(~r/[^a-z0-9_]/, "_")
++  end
++
++  @doc """
++  Whether a new account with this email would get a username that is already taken.
++  """
++  @spec username_taken?(String.t()) :: boolean()
++  def username_taken?(email) do
++    enabled?() and not is_nil(Actors.get_local_actor_by_name(username_for(email)))
++  end
++
++  @doc """
++  Creates the locked profile of an account that has none, and resets the display name
++  of its profiles to their username.
++  """
++  @spec ensure(User.t()) :: :ok | {:error, :profile_username_taken}
++  def ensure(%User{} = user) do
++    if locked?(user), do: do_ensure(user), else: :ok
++  end
++
++  defp do_ensure(%User{id: user_id, email: email} = user) do
++    case Users.get_actors_for_user(user) do
++      [] ->
++        username = username_for(email)
++
++        case Actors.new_person(
++               %{preferred_username: username, name: username, user_id: user_id},
++               true
++             ) do
++          {:ok, %Actor{}} ->
++            :ok
++
++          {:error, err} ->
++            Logger.warning(
++              "Unable to create the locked profile \"#{username}\" for user #{user_id}: #{inspect(err)}"
++            )
++
++            {:error, :profile_username_taken}
++        end
++
++      actors ->
++        Enum.each(actors, &sync_name/1)
++    end
++  end
++
++  defp sync_name(%Actor{preferred_username: username, name: username}), do: :ok
++
++  defp sync_name(%Actor{preferred_username: username} = actor) do
++    Actions.Update.update(actor, %{name: username}, true)
++    :ok
++  end
++end
+diff --git a/lib/service/auth/authenticator.ex b/lib/service/auth/authenticator.ex
+index 28407d1..4f3aac6 100644
+--- a/lib/service/auth/authenticator.ex
++++ b/lib/service/auth/authenticator.ex
+@@ -3,6 +3,7 @@ defmodule Mobilizon.Service.Auth.Authenticator do
+   Module to handle authentification (currently through database or LDAP)
+   """
+   alias Mobilizon.Users
++  alias Mobilizon.Users.LockedProfile
+   alias Mobilizon.Users.User
+   alias Mobilizon.Web.Auth.Guardian
+ 
+@@ -62,12 +63,18 @@ defmodule Mobilizon.Service.Auth.Authenticator do
+   """
+   @spec generate_tokens(User.t() | ApplicationToken.t()) :: {:ok, tokens} | {:error, any()}
+   def generate_tokens(user) do
+-    with {:ok, access_token} <- generate_access_token(user),
++    with :ok <- maybe_ensure_locked_profile(user),
++         {:ok, access_token} <- generate_access_token(user),
+          {:ok, refresh_token} <- generate_refresh_token(user) do
+       {:ok, %{access_token: access_token, refresh_token: refresh_token}}
+     end
+   end
+ 
++  # mobilizon-patched: every login of a user goes through here (password, LDAP,
++  # OAuth, email validation), so this is where locked profiles are created and synced.
++  defp maybe_ensure_locked_profile(%User{} = user), do: LockedProfile.ensure(user)
++  defp maybe_ensure_locked_profile(_), do: :ok
++
+   @doc """
+   Generates access token for an user.
+   """
+diff --git a/src/components/Settings/SettingsMenu.vue b/src/components/Settings/SettingsMenu.vue
+index adc2286..e8f0de5 100644
+--- a/src/components/Settings/SettingsMenu.vue
++++ b/src/components/Settings/SettingsMenu.vue
+@@ -36,6 +36,11 @@
+           }"
+         />
+         <SettingMenuItem
++          v-if="
++            !(restrictProfiles || lockProfiles) ||
++            !identities?.length ||
++            currentUser?.role == ICurrentUserRole.ADMINISTRATOR
++          "
+           :title="t('New profile')"
+           :to="{ name: RouteName.CREATE_IDENTITY }"
+         />
+@@ -97,10 +102,12 @@ import SettingMenuItem from "./SettingMenuItem.vue";
+ import RouteName from "@/router/name";
+ import { useCurrentUserClient } from "@/composition/apollo/user";
+ import { useCurrentUserIdentities } from "@/composition/apollo/actor";
++import { useRestrictProfiles } from "@/composition/apollo/config";
+ import { useI18n } from "vue-i18n";
+ 
+ const { currentUser } = useCurrentUserClient();
+ const { identities } = useCurrentUserIdentities();
++const { restrictProfiles, lockProfiles } = useRestrictProfiles();
+ 
+ const { t } = useI18n({ useScope: "global" });
+ </script>
+diff --git a/src/composition/apollo/config.ts b/src/composition/apollo/config.ts
+index 5b2c645..134bafb 100644
+--- a/src/composition/apollo/config.ts
++++ b/src/composition/apollo/config.ts
+@@ -241,6 +241,20 @@ export function useSearchConfig() {
+   return { searchConfig, error, loading, onResult };
+ }
+ 
++export function useRestrictProfiles() {
++  const { result } = useQuery<{
++    config: Pick<IConfig, "restrictProfiles" | "lockProfiles">;
++  }>(CONFIG);
++
++  const restrictProfiles = computed(
++    () => result.value?.config?.restrictProfiles ?? false
++  );
++  const lockProfiles = computed(
++    () => result.value?.config?.lockProfiles ?? false
++  );
++  return { restrictProfiles, lockProfiles };
++}
++
+ export function useRegistrationConfig() {
+   const { result, error, loading, onResult } = useQuery<{
+     config: Pick<
+diff --git a/src/graphql/config.ts b/src/graphql/config.ts
+index d6bb2d6..6bc374c 100644
+--- a/src/graphql/config.ts
++++ b/src/graphql/config.ts
+@@ -11,6 +11,8 @@ export const CONFIG = gql`
+       version
+       federating
+       registrationsOpen
++      restrictProfiles
++      lockProfiles
+       registrationsModeration
+       registrationsAllowlist
+       demoMode
+diff --git a/src/types/config.model.ts b/src/types/config.model.ts
+index f56874f..779dda7 100644
+--- a/src/types/config.model.ts
++++ b/src/types/config.model.ts
+@@ -44,6 +44,8 @@ export interface IConfig {
+   secondaryColor: string;
+ 
+   registrationsOpen: boolean;
++  restrictProfiles: boolean;
++  lockProfiles: boolean;
+   registrationsModeration: boolean;
+   registrationsAllowlist: boolean;
+   demoMode: boolean;
+diff --git a/src/views/Account/children/EditIdentity.vue b/src/views/Account/children/EditIdentity.vue
+index 3dc1c73..4dfcd9d 100644
+--- a/src/views/Account/children/EditIdentity.vue
++++ b/src/views/Account/children/EditIdentity.vue
+@@ -35,6 +35,7 @@
+           required
+           v-model="identity.name"
+           @update:modelValue="(value: string) => updateUsername(value)"
++          :disabled="nameLocked"
+           id="identity-display-name"
+           dir="auto"
+           expanded
+@@ -234,7 +235,7 @@ import { IFeedToken } from "@/types/feedtoken.model";
+ import { ServerParseError } from "@apollo/client/link/http";
+ import { ApolloCache, FetchResult, InMemoryCache } from "@apollo/client/core";
+ import pick from "lodash/pick";
+-import { ActorType } from "@/types/enums";
++import { ActorType, ICurrentUserRole } from "@/types/enums";
+ import { useRouter } from "vue-router";
+ import {
+   useCurrentActorClient,
+@@ -242,6 +243,8 @@ import {
+ } from "@/composition/apollo/actor";
+ import { useMutation, useQuery, useApolloClient } from "@vue/apollo-composable";
+ import { useAvatarMaxSize } from "@/composition/config";
++import { useRestrictProfiles } from "@/composition/apollo/config";
++import { useCurrentUserClient } from "@/composition/apollo/user";
+ import { computed, inject, ref, watch } from "vue";
+ import { useI18n } from "vue-i18n";
+ import { convertToUsername } from "@/utils/username";
+@@ -268,6 +271,15 @@ const { currentActor } = useCurrentActorClient();
+ 
+ const { identities } = useCurrentUserIdentities();
+ 
++// mobilizon-patched: locked profiles are named after the account email.
++const { lockProfiles } = useRestrictProfiles();
++const { currentUser } = useCurrentUserClient();
++const nameLocked = computed(
++  () =>
++    lockProfiles.value &&
++    currentUser.value?.role !== ICurrentUserRole.ADMINISTRATOR
++);
++
+ const {
+   result: personResult,
+   onError: onPersonError,
