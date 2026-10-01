@@ -25,6 +25,10 @@ dependency tree and currently fails.
 The auth controller fetches cookies, so the generic OIDC strategy
 (ueberauth_oidcc) can read its state cookie on the callback instead of
 crashing.
+
+The login page shows a button for every OAuth provider that has a label in
+the config, not only for the ids in its built-in list, so a generic OpenID
+Connect provider can use any id, such as oidc.
 ---
  .dockerignore                               |  1 -
  config/config.exs                           |  2 +
@@ -39,11 +43,13 @@ crashing.
  lib/service/auth/authenticator.ex           |  9 +-
  lib/web/controllers/auth_controller.ex      |  4 +
  src/components/Settings/SettingsMenu.vue    |  7 ++
+ src/components/User/AuthProvider.vue        |  7 +-
  src/composition/apollo/config.ts            | 14 ++++
  src/graphql/config.ts                       |  2 +
  src/types/config.model.ts                   |  2 +
  src/views/Account/children/EditIdentity.vue | 14 +++-
- 17 files changed, 209 insertions(+), 9 deletions(-)
+ src/views/User/LoginView.vue                |  2 +-
+ 19 files changed, 216 insertions(+), 11 deletions(-)
  create mode 100644 lib/mobilizon/users/locked_profile.ex
 
 diff --git a/.dockerignore b/.dockerignore
@@ -441,6 +447,24 @@ index adc2286..e8f0de5 100644
  
  const { t } = useI18n({ useScope: "global" });
  </script>
+diff --git a/src/components/User/AuthProvider.vue b/src/components/User/AuthProvider.vue
+index a7a946d..8eb1d98 100644
+--- a/src/components/User/AuthProvider.vue
++++ b/src/components/User/AuthProvider.vue
+@@ -29,7 +29,12 @@ const props = defineProps<{
+   oauthProvider: IOAuthProvider;
+ }>();
+ 
++// mobilizon-patched: a provider with a label from the config (such as a generic
++// OpenID Connect provider) gets a button even if its id isn't a known one.
+ const isProviderSelected = computed((): boolean => {
+-  return Object.keys(SELECTED_PROVIDERS).includes(props.oauthProvider.id);
++  return (
++    !!props.oauthProvider.label ||
++    Object.keys(SELECTED_PROVIDERS).includes(props.oauthProvider.id)
++  );
+ });
+ </script>
 diff --git a/src/composition/apollo/config.ts b/src/composition/apollo/config.ts
 index 5b2c645..134bafb 100644
 --- a/src/composition/apollo/config.ts
@@ -538,3 +562,19 @@ index 3dc1c73..4dfcd9d 100644
  const {
    result: personResult,
    onError: onPersonError,
+diff --git a/src/views/User/LoginView.vue b/src/views/User/LoginView.vue
+index 8b05753..1a13570 100644
+--- a/src/views/User/LoginView.vue
++++ b/src/views/User/LoginView.vue
+@@ -298,7 +298,7 @@ const caseWarningType = computed<string | undefined>(() => {
+ const currentProvider = computed(() => {
+   const queryProvider = route?.query.provider as string | undefined;
+   if (queryProvider) {
+-    return SELECTED_PROVIDERS[queryProvider];
++    return SELECTED_PROVIDERS[queryProvider] ?? queryProvider;
+   }
+   return "unknown provider";
+ });
+-- 
+2.43.0
+
