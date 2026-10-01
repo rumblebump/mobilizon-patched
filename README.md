@@ -14,9 +14,16 @@ It runs every Monday and on every push to `main`. It only builds when no image e
 
 ## Patches
 
-| Patch | What it does |
+`patches/0001-profiles.patch` adds two opt-in settings. Both are read from the environment at boot, default to `false`, and don't apply to administrators. Without them the image behaves like upstream.
+
+| Variable | Effect |
 | --- | --- |
-| `0001-restrict-profiles` | Adds `MOBILIZON_INSTANCE_RESTRICT_PROFILES` (default `false`, read at boot). When `true`, every account (local, LDAP or OAuth/OIDC login) can create one profile, chosen at first login. A second `createPerson` fails with "You can only have one profile", and the "New profile" settings entry is hidden once the account has one. Administrators can still create more. Without the variable the image behaves like upstream. Outside Docker, set `config :mobilizon, :instance, restrict_profiles: true`. |
+| `MOBILIZON_INSTANCE_RESTRICT_PROFILES=true` | Every account (local, LDAP or OAuth/OIDC login) can create one profile, chosen at first login. A second `createPerson` fails with "You can only have one profile", and the "New profile" settings entry is hidden. |
+| `MOBILIZON_INSTANCE_LOCK_PROFILES=true` | The profile is created automatically on the first login. Its username **and** display name are the part of the account email before the `@`: lowercased, with every character other than `a-z`, `0-9` and `_` replaced by `_` (`John.Doe@example.org` becomes `john_doe`). The display name can't be edited and is reset to the username on every login, so nobody can pose as someone else. A local signup whose username is already taken is refused; an LDAP or OAuth login whose username is taken fails. This also limits accounts to one profile. |
+
+Outside Docker, set `config :mobilizon, :instance, restrict_profiles: true` or `lock_profiles: true`.
+
+The patch also switches the production Dockerfile from `npm install` to `npm ci`, because re-resolving the dependency tree currently fails.
 
 ## Working on a patch
 
