@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: mobilizon-patched <noreply@github.com>
+Date: Thu, 1 Oct 2026 07:40:40 +0000
+Subject: [PATCH] Limit non-admin accounts to a single profile
+
+Every account, whatever the login method (local, LDAP, OAuth), can create
+one profile. Administrators can still create more. The "New profile"
+settings entry is hidden for accounts that already have one.
+---
+ lib/graphql/resolvers/person.ex          | 12 +++++++++++-
+ src/components/Settings/SettingsMenu.vue |  4 ++++
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/lib/graphql/resolvers/person.ex b/lib/graphql/resolvers/person.ex
+index 792bc11..4774d63 100644
+--- a/lib/graphql/resolvers/person.ex
++++ b/lib/graphql/resolvers/person.ex
+@@ -138,7 +138,8 @@ defmodule Mobilizon.GraphQL.Resolvers.Person do
+     args = Map.put(args, :user_id, user.id)
+     user_agent = Map.get(context, :user_agent, "")
+ 
+-    with args <- Map.update(args, :preferred_username, "", &String.downcase/1),
++    with {:single_profile, true} <- {:single_profile, can_create_profile?(user)},
++         args <- Map.update(args, :preferred_username, "", &String.downcase/1),
+          {:spam, :ham} <-
+            {:spam,
+             AntiSpam.service().check_profile(
+@@ -152,6 +153,9 @@ defmodule Mobilizon.GraphQL.Resolvers.Person do
+          {:ok, %Actor{} = new_person} <- Actors.new_person(args) do
+       {:ok, new_person}
+     else
++      {:single_profile, false} ->
++        {:error, dgettext("errors", "You can only have one profile")}
++
+       {:error, err} ->
+         {:error, err}
+ 
+@@ -177,6 +181,12 @@ defmodule Mobilizon.GraphQL.Resolvers.Person do
+     {:error, :unauthenticated}
+   end
+ 
++  # mobilizon-patched: every account gets a single profile, whatever the login
++  # method (local, LDAP, OAuth). Administrators may still create more.
++  @spec can_create_profile?(User.t()) :: boolean()
++  defp can_create_profile?(%User{role: role}) when is_admin(role), do: true
++  defp can_create_profile?(%User{} = user), do: Users.get_actors_for_user(user) == []
++
+   @doc """
+   This function is used to update an existing identity
+   """
+diff --git a/src/components/Settings/SettingsMenu.vue b/src/components/Settings/SettingsMenu.vue
+index adc2286..e492bdc 100644
+--- a/src/components/Settings/SettingsMenu.vue
++++ b/src/components/Settings/SettingsMenu.vue
+@@ -36,6 +36,10 @@
+           }"
+         />
+         <SettingMenuItem
++          v-if="
++            !identities?.length ||
++            currentUser?.role == ICurrentUserRole.ADMINISTRATOR
++          "
+           :title="t('New profile')"
+           :to="{ name: RouteName.CREATE_IDENTITY }"
+         />
