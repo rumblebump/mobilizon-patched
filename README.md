@@ -12,6 +12,8 @@ ghcr.io/rumblebump/mobilizon-patched:latest
 
 It runs every Monday and on every push to `main`. It only builds when no image exists yet for the newest upstream release and the current patch set, so a new upstream release or a patch change produces a new image. Run it by hand (Actions → build → Run workflow) to build a specific upstream tag or to force a rebuild. Pull requests build the image without pushing it, so a patch that no longer applies or compiles fails there.
 
+To try a branch before merging, run the workflow by hand on that branch. It publishes only `ghcr.io/rumblebump/mobilizon-patched:dev`, overwriting the previous dev build, and leaves the release tags alone.
+
 ## Patches
 
 `patches/0001-profiles.patch` adds two opt-in settings. Both are read from the environment at boot, default to `false`, and don't apply to administrators. Without them the image behaves like upstream.
@@ -22,6 +24,10 @@ It runs every Monday and on every push to `main`. It only builds when no image e
 | `MOBILIZON_INSTANCE_LOCK_PROFILES=true` | The profile is created automatically on the first login. Its username **and** display name are the part of the account email before the `@`: lowercased, with every character other than `a-z`, `0-9` and `_` replaced by `_` (`John.Doe@example.org` becomes `john_doe`). The display name can't be edited and is reset to the username on every login, so nobody can pose as someone else. A local signup whose username is already taken is refused; an LDAP or OAuth login whose username is taken fails. This also limits accounts to one profile. |
 
 Outside Docker, set `config :mobilizon, :instance, restrict_profiles: true` or `lock_profiles: true`.
+
+The patch also fixes generic OpenID Connect login (`ueberauth_oidcc`): the auth controller now fetches cookies, so the OIDC state cookie can be read on the callback instead of crashing with "cannot fetch key … from conn.cookies because they were not fetched".
+
+The patch also shows a login button for every OAuth provider that has a label in the config. Upstream only draws buttons for a fixed list of provider ids (twitter, discord, facebook, github, gitlab, google, keycloak, ldap, cas), so a generic OpenID Connect provider registered as `oidc` got no button.
 
 The patch also makes the Docker build use `npm ci` with upstream's `package-lock.json` (which `.dockerignore` excluded), because `npm install` re-resolves the dependency tree and currently fails.
 

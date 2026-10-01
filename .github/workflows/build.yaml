@@ -57,8 +57,15 @@ jobs:
           patchset="$(cat patches/*.patch 2>/dev/null | sha256sum | cut -c1-7)"
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/mobilizon-patched"
 
-          tags="$image:$version,$image:$version-p$patchset"
-          [[ "$tag" == "$latest" ]] && tags="$tags,$image:latest"
+          if [[ "$GITHUB_REF" == refs/heads/main || "$GITHUB_EVENT_NAME" == pull_request ]]; then
+            tags="$image:$version,$image:$version-p$patchset"
+            [[ "$tag" == "$latest" ]] && tags="$tags,$image:latest"
+            dev=false
+          else
+            # A manual run from any other branch publishes only a "dev" tag, for testing before merge.
+            tags="$image:dev"
+            dev=true
+          fi
 
           echo "Upstream $tag (newest: $latest), patch set $patchset"
           {
@@ -66,6 +73,7 @@ jobs:
             echo "version=$version-p$patchset"
             echo "image=$image"
             echo "tags=$tags"
+            echo "dev=$dev"
           } >> "$GITHUB_OUTPUT"
 
       # Fails here, before any build, when a patch no longer applies to upstream.
@@ -76,8 +84,9 @@ jobs:
         env:
           FORCE: ${{ inputs.force }}
         run: |
-          # Pull requests always build (without pushing) so the patches are compiled before merge.
-          if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
+          # Pull requests always build (without pushing) so the patches are compiled before merge,
+          # and dev builds always rebuild the moving "dev" tag.
+          if [[ "$GITHUB_EVENT_NAME" == pull_request || "${{ steps.version.outputs.dev }}" == true ]]; then
             echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
