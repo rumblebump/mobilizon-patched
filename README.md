@@ -12,6 +12,8 @@ ghcr.io/rumblebump/mobilizon-patched:latest
 
 It runs every Monday and on every push to `main`. It only builds when no image exists yet for the newest upstream release and the current patch set, so a new upstream release or a patch change produces a new image. Run it by hand (Actions → build → Run workflow) to build a specific upstream tag or to force a rebuild. Pull requests build the image without pushing it, so a patch that no longer applies or compiles fails there.
 
+To try a branch before merging, run the workflow by hand on that branch. It publishes only `ghcr.io/rumblebump/mobilizon-patched:dev`, overwriting the previous dev build, and leaves the release tags alone.
+
 ## Patches
 
 `patches/0001-profiles.patch` adds two opt-in settings. Both are read from the environment at boot, default to `false`, and don't apply to administrators. Without them the image behaves like upstream.
