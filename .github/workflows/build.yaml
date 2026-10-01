@@ -76,8 +76,9 @@ jobs:
         env:
           FORCE: ${{ inputs.force }}
         run: |
+          # Pull requests always build (without pushing) so the patches are compiled before merge.
           if [[ "$GITHUB_EVENT_NAME" == pull_request ]]; then
-            echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
+            echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           ref="${{ steps.version.outputs.image }}:${{ steps.version.outputs.version }}"
@@ -110,6 +111,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -130,17 +132,19 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ needs.resolve.outputs.version }}
             org.opencontainers.image.licenses=AGPL-3.0
-          outputs: type=image,name=${{ needs.resolve.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ needs.resolve.outputs.image }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=${{ matrix.platform }}
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
 
-      - run: |
+      - if: github.event_name != 'pull_request'
+        run: |
           mkdir -p "$RUNNER_TEMP/digests"
           touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: digest-${{ strategy.job-index }}
           path: ${{ runner.temp }}/digests/*
@@ -148,6 +152,7 @@ jobs:
 
   publish:
     needs: [resolve, build]
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       packages: write
