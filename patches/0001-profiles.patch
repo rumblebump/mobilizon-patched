@@ -21,6 +21,10 @@ behaves like upstream until enabled.
 The production Docker build uses npm ci with the committed package-lock.json
 (no longer excluded by .dockerignore), as npm install re-resolves the
 dependency tree and currently fails.
+
+The auth controller fetches cookies, so the generic OIDC strategy
+(ueberauth_oidcc) can read its state cookie on the callback instead of
+crashing.
 ---
  .dockerignore                               |  1 -
  config/config.exs                           |  2 +
@@ -33,12 +37,13 @@ dependency tree and currently fails.
  lib/mobilizon/config.ex                     | 13 +++
  lib/mobilizon/users/locked_profile.ex       | 91 +++++++++++++++++++++
  lib/service/auth/authenticator.ex           |  9 +-
+ lib/web/controllers/auth_controller.ex      |  4 +
  src/components/Settings/SettingsMenu.vue    |  7 ++
  src/composition/apollo/config.ts            | 14 ++++
  src/graphql/config.ts                       |  2 +
  src/types/config.model.ts                   |  2 +
  src/views/Account/children/EditIdentity.vue | 14 +++-
- 16 files changed, 205 insertions(+), 9 deletions(-)
+ 17 files changed, 209 insertions(+), 9 deletions(-)
  create mode 100644 lib/mobilizon/users/locked_profile.ex
 
 diff --git a/.dockerignore b/.dockerignore
@@ -392,6 +397,21 @@ index 28407d1..4f3aac6 100644
    @doc """
    Generates access token for an user.
    """
+diff --git a/lib/web/controllers/auth_controller.ex b/lib/web/controllers/auth_controller.ex
+index 17780ff..e622f87 100644
+--- a/lib/web/controllers/auth_controller.ex
++++ b/lib/web/controllers/auth_controller.ex
+@@ -14,6 +14,10 @@ defmodule Mobilizon.Web.AuthController do
+     signing_salt: {Mobilizon.Web.AuthController, :secret_key_base, []}
+   )
+ 
++  # mobilizon-patched: ueberauth_oidcc keeps its state in a cookie and reads
++  # conn.req_cookies on the callback, which crashes unless cookies are fetched.
++  plug(:fetch_cookies)
++
+   plug(Ueberauth)
+ 
+   @spec request(Plug.Conn.t(), map()) :: Plug.Conn.t()
 diff --git a/src/components/Settings/SettingsMenu.vue b/src/components/Settings/SettingsMenu.vue
 index adc2286..e8f0de5 100644
 --- a/src/components/Settings/SettingsMenu.vue

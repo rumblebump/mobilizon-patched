@@ -23,6 +23,8 @@ It runs every Monday and on every push to `main`. It only builds when no image e
 
 Outside Docker, set `config :mobilizon, :instance, restrict_profiles: true` or `lock_profiles: true`.
 
+The patch also fixes generic OpenID Connect login (`ueberauth_oidcc`): the auth controller now fetches cookies, so the OIDC state cookie can be read on the callback instead of crashing with "cannot fetch key … from conn.cookies because they were not fetched".
+
 The patch also makes the Docker build use `npm ci` with upstream's `package-lock.json` (which `.dockerignore` excluded), because `npm install` re-resolves the dependency tree and currently fails.
 
 ## Working on a patch
