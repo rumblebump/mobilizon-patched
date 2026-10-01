@@ -18,9 +18,11 @@ taken fails.
 Administrators are exempt from both. Both default to false, so the image
 behaves like upstream until enabled.
 
-The production Dockerfile uses npm ci, as npm install re-resolves the
+The production Docker build uses npm ci with the committed package-lock.json
+(no longer excluded by .dockerignore), as npm install re-resolves the
 dependency tree and currently fails.
 ---
+ .dockerignore                               |  1 -
  config/config.exs                           |  2 +
  config/docker.exs                           |  2 +
  docker/production/Dockerfile                |  3 +-
@@ -36,9 +38,21 @@ dependency tree and currently fails.
  src/graphql/config.ts                       |  2 +
  src/types/config.model.ts                   |  2 +
  src/views/Account/children/EditIdentity.vue | 14 +++-
- 15 files changed, 205 insertions(+), 8 deletions(-)
+ 16 files changed, 205 insertions(+), 9 deletions(-)
  create mode 100644 lib/mobilizon/users/locked_profile.ex
 
+diff --git a/.dockerignore b/.dockerignore
+index 7f29df3..3273c22 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -19,7 +19,6 @@ Makefile
+ README.md
+ SECURITY.md
+ ssh_match_hostname
+-package-lock.json
+ node_modules
+ playwright-report
+ test
 diff --git a/config/config.exs b/config/config.exs
 index 66b56f8..4f43810 100644
 --- a/config/config.exs

@@ -23,7 +23,7 @@ It runs every Monday and on every push to `main`. It only builds when no image e
 
 Outside Docker, set `config :mobilizon, :instance, restrict_profiles: true` or `lock_profiles: true`.
 
-The patch also switches the production Dockerfile from `npm install` to `npm ci`, because re-resolving the dependency tree currently fails.
+The patch also makes the Docker build use `npm ci` with upstream's `package-lock.json` (which `.dockerignore` excluded), because `npm install` re-resolves the dependency tree and currently fails.
 
 ## Working on a patch
 
