@@ -25,7 +25,7 @@ To try a branch before merging, run the workflow by hand on that branch. It publ
 
 Outside Docker, set `config :mobilizon, :instance, restrict_profiles: true` or `lock_profiles: true`.
 
-The patch also fixes generic OpenID Connect login (`ueberauth_oidcc`): the auth controller now fetches cookies, so the OIDC state cookie can be read on the callback instead of crashing with "cannot fetch key … from conn.cookies because they were not fetched".
+The patch also fixes generic OpenID Connect login (`ueberauth_oidcc`): the auth controller now fetches cookies, so the OIDC state cookie can be read on the callback instead of crashing with "cannot fetch key … from conn.cookies because they were not fetched". It also uses the instance's public URL (`https://<host>`) as the request URL in the auth controller, because behind a TLS-terminating proxy Mobilizon sees plain http and `ueberauth_oidcc` would otherwise reject the callback with "Redirected to the wrong URI: http://…".
 
 The patch also shows a login button for every OAuth provider that has a label in the config. Upstream only draws buttons for a fixed list of provider ids (twitter, discord, facebook, github, gitlab, google, keycloak, ldap, cas), so a generic OpenID Connect provider registered as `oidc` got no button.
 

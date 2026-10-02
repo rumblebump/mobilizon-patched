@@ -24,7 +24,8 @@ dependency tree and currently fails.
 
 The auth controller fetches cookies, so the generic OIDC strategy
 (ueberauth_oidcc) can read its state cookie on the callback instead of
-crashing.
+crashing. It also treats the instance's public URL as the request URL, so the
+OIDC callback check accepts https redirect URIs behind a TLS-terminating proxy.
 
 The login page shows a button for every OAuth provider that has a label in
 the config, not only for the ids in its built-in list, so a generic OpenID
@@ -41,7 +42,7 @@ Connect provider can use any id, such as oidc.
  lib/mobilizon/config.ex                     | 13 +++
  lib/mobilizon/users/locked_profile.ex       | 91 +++++++++++++++++++++
  lib/service/auth/authenticator.ex           |  9 +-
- lib/web/controllers/auth_controller.ex      |  4 +
+ lib/web/controllers/auth_controller.ex      | 20 +++++
  src/components/Settings/SettingsMenu.vue    |  7 ++
  src/components/User/AuthProvider.vue        |  7 +-
  src/composition/apollo/config.ts            | 14 ++++
@@ -49,7 +50,7 @@ Connect provider can use any id, such as oidc.
  src/types/config.model.ts                   |  2 +
  src/views/Account/children/EditIdentity.vue | 14 +++-
  src/views/User/LoginView.vue                |  2 +-
- 19 files changed, 216 insertions(+), 11 deletions(-)
+ 19 files changed, 232 insertions(+), 11 deletions(-)
  create mode 100644 lib/mobilizon/users/locked_profile.ex
 
 diff --git a/.dockerignore b/.dockerignore
@@ -404,10 +405,10 @@ index 28407d1..4f3aac6 100644
    Generates access token for an user.
    """
 diff --git a/lib/web/controllers/auth_controller.ex b/lib/web/controllers/auth_controller.ex
-index 17780ff..e622f87 100644
+index 17780ff..8dfd068 100644
 --- a/lib/web/controllers/auth_controller.ex
 +++ b/lib/web/controllers/auth_controller.ex
-@@ -14,6 +14,10 @@ defmodule Mobilizon.Web.AuthController do
+@@ -14,6 +14,15 @@ defmodule Mobilizon.Web.AuthController do
      signing_salt: {Mobilizon.Web.AuthController, :secret_key_base, []}
    )
  
@@ -415,9 +416,32 @@ index 17780ff..e622f87 100644
 +  # conn.req_cookies on the callback, which crashes unless cookies are fetched.
 +  plug(:fetch_cookies)
 +
++  # mobilizon-patched: behind a TLS-terminating proxy Phoenix sees plain http, but
++  # ueberauth_oidcc checks that the callback arrived at the exact (https) redirect URI
++  # it sent. Use the instance's public URL as the request URL instead.
++  plug(:put_public_url)
++
    plug(Ueberauth)
  
    @spec request(Plug.Conn.t(), map()) :: Plug.Conn.t()
+@@ -155,6 +164,17 @@ defmodule Mobilizon.Web.AuthController do
+     redirect(conn, to: "/login?code=Error with Login Provider&provider=#{provider_name}")
+   end
+ 
++  defp put_public_url(conn, _opts) do
++    %URI{scheme: scheme, host: host, port: port} = Mobilizon.Web.Endpoint.struct_url()
++
++    %Plug.Conn{
++      conn
++      | scheme: if(scheme == "https", do: :https, else: :http),
++        host: host,
++        port: port
++    }
++  end
++
+   def secret_key_base do
+     :mobilizon
+     |> Application.get_env(Mobilizon.Web.Endpoint, [])
 diff --git a/src/components/Settings/SettingsMenu.vue b/src/components/Settings/SettingsMenu.vue
 index adc2286..e8f0de5 100644
 --- a/src/components/Settings/SettingsMenu.vue
