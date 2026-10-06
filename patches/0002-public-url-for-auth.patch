@@ -1,0 +1,29 @@
+diff --git a/lib/web/controllers/auth_controller.ex b/lib/web/controllers/auth_controller.ex
+index e622f87..e070164 100644
+--- a/lib/web/controllers/auth_controller.ex
++++ b/lib/web/controllers/auth_controller.ex
+@@ -18,6 +18,12 @@ defmodule Mobilizon.Web.AuthController do
+   # conn.req_cookies on the callback, which crashes unless cookies are fetched.
+   plug(:fetch_cookies)
+ 
++  # mobilizon-patched: behind a TLS-terminating proxy the request arrives as plain HTTP,
++  # but OAuth/OIDC callback URLs must be the public https ones. ueberauth_oidcc
++  # rejects the callback ("Redirected to the wrong URI: http://...") otherwise. Take scheme,
++  # host and port from the endpoint's public URL (MOBILIZON_INSTANCE_HOST).
++  plug(:put_public_url)
++
+   plug(Ueberauth)
+ 
+   @spec request(Plug.Conn.t(), map()) :: Plug.Conn.t()
+@@ -159,6 +165,11 @@ defmodule Mobilizon.Web.AuthController do
+     redirect(conn, to: "/login?code=Error with Login Provider&provider=#{provider_name}")
+   end
+ 
++  defp put_public_url(conn, _opts) do
++    %URI{scheme: scheme, host: host, port: port} = Mobilizon.Web.Endpoint.struct_url()
++    %{conn | scheme: String.to_existing_atom(scheme), host: host, port: port}
++  end
++
+   def secret_key_base do
+     :mobilizon
+     |> Application.get_env(Mobilizon.Web.Endpoint, [])
