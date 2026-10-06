@@ -31,6 +31,8 @@ The patch also shows a login button for every OAuth provider that has a label in
 
 The patch also makes the Docker build use `npm ci` with upstream's `package-lock.json` (which `.dockerignore` excluded), because `npm install` re-resolves the dependency tree and currently fails.
 
+`patches/0002-public-url-for-auth.patch` fixes OAuth/OIDC login behind a TLS-terminating proxy. Mobilizon sees the callback as `http://…`, so `ueberauth_oidcc` rejected it with "Redirected to the wrong URI: http://…/auth/<provider>/callback". The auth controller now takes scheme, host and port from the instance's public URL (`MOBILIZON_INSTANCE_HOST`, https on 443).
+
 ## Working on a patch
 
 ```sh
